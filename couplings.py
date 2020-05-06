@@ -11,13 +11,16 @@ class CouplingTransform(transform.Transform):
     images (NxCxHxW). For images the splitting is done on the channel dimension, using the
     provided 1D mask."""
 
-    def __init__(self,mask,transform_net_create_fn):
+    def __init__(self,mask,transform_net_create_fn,blob=None):
         """
         Constructor.
         Args:
             mask: a 1-dim tensor, tuple or list. It indexes inputs as follows:
                 * If `mask[i] > 0`, `input[i]` will be transformed.
                 * If `mask[i] <= 0`, `input[i]` will be passed unchanged.
+            transform_net_create_fn : lambda defining a network based on in_features and out_features
+                TODO : might want to include options in the transform definition
+            blob : int for number of bins to include in the input one-blob encoding
         """
         mask = torch.as_tensor(mask)
         if mask.dim() != 1:
@@ -34,10 +37,22 @@ class CouplingTransform(transform.Transform):
 
         assert self.num_identity_features + self.num_transform_features == self.features
 
-        self.transform_net = transform_net_create_fn(
-            self.num_identity_features,
-            self.num_transform_features * self._transform_dim_multiplier()
-        )
+        self.blob = bool(blob)
+        if self.blob:
+            if not isinstance(blob, int):
+                raise ValueError('Blob encoding requires a number of bins')             
+            self.nbins_in = int(blob)
+
+        if self.blob:
+            self.transform_net = transform_net_create_fn(
+                self.num_identity_features*self.nbins_in,
+                self.num_transform_features * self._transform_dim_multiplier()
+            )
+        else:
+            self.transform_net = transform_net_create_fn(
+                self.num_identity_features,
+                self.num_transform_features * self._transform_dim_multiplier()
+            )
 
     @property
     def num_identity_features(self):
@@ -46,6 +61,13 @@ class CouplingTransform(transform.Transform):
     @property
     def num_transform_features(self):
         return len(self.transform_features)
+
+    def one_blob(self,xd):
+        binning = (0.5/nbins_in) + torch.arange(0., 1.,1./nbins_in).repeat(xd.numel())
+        binning = binning.reshape(-1,num_identity_features,nbins_in)
+        x = xd.unsqueeze(-1)
+        res = torch.exp(((-nbins_in*nbins_in)/2.) * (binning-x)**2)
+        return res.reshape(-1,num_identity_features*nbins_in)
 
     def forward(self, inputs, context=None):
         if inputs.dim() not in [2, 4]:
@@ -58,7 +80,12 @@ class CouplingTransform(transform.Transform):
         identity_split = inputs[:, self.identity_features, ...]
         transform_split = inputs[:, self.transform_features, ...]
 
-        transform_params = self.transform_net(identity_split, context)
+        if self.blob:
+            identity_split_blob = self.one_blob(identity_split)
+            transform_params = self.transform_net(identity_split_blob, context)
+        else:
+            transform_params = self.transform_net(identity_split, context)
+
         transform_split, absdet = self._coupling_transform_forward(
             inputs=transform_split,
             transform_params=transform_params
@@ -143,7 +170,7 @@ class AdditiveCouplingTransform(AffineCouplingTransform):
 
     def _scale_and_shift(self, transform_params):
         shift = transform_params
-        scale = torch.ones_like(shift)
+        scale = torch.ones_like(shift,requires_grad=True)
         return scale, shift
 
 
