@@ -11,6 +11,12 @@ DEFAULT_MIN_BIN_HEIGHT = 1e-3
 DEFAULT_EPS = 1e-5
 DEFAULT_QUADRATIC_THRESHOLD = 1e-3
 
+"""
+Free inspiration from :
+    https://github.com/bayesiains/nsf, arXiv:1906.04032 (PyTorch)
+    https://gitlab.com/i-flow/i-flow/, arXiv:2001.05486 (Tensorflow)
+"""
+
 def linear_spline(inputs, unnormalized_pdf,
                   inverse=False,
                   left=0., right=1., bottom=0., top=1.):
@@ -87,6 +93,11 @@ def quadratic_spline(inputs,
                      left=0., right=1., bottom=0., top=1.,
                      min_bin_width=DEFAULT_MIN_BIN_WIDTH,
                      min_bin_height=DEFAULT_MIN_BIN_HEIGHT):
+
+    """
+    Reference:
+    > Müller et al., Neural Importance Sampling, arXiv:1808.03856, 2018.
+    """
     if not inverse and (torch.min(inputs) < left or torch.max(inputs) > right):
         raise transforms.InputOutsideDomain()
     elif inverse and (torch.min(inputs) < bottom or torch.max(inputs) > top):

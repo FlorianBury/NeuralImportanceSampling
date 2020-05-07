@@ -7,9 +7,14 @@ import transform
 import splines
 
 class CouplingTransform(transform.Transform):
-    """A base class for coupling layers. Supports 2D inputs (NxD), as well as 4D inputs for
+    """
+    A base class for coupling layers. Supports 2D inputs (NxD), as well as 4D inputs for
     images (NxCxHxW). For images the splitting is done on the channel dimension, using the
-    provided 1D mask."""
+    provided 1D mask.
+    Free inspiration from :
+        https://github.com/bayesiains/nsf, arXiv:1906.04032 (PyTorch)
+        https://gitlab.com/i-flow/i-flow/, arXiv:2001.05486 (Tensorflow)
+    """
 
     def __init__(self,mask,transform_net_create_fn,blob=None):
         """
@@ -45,7 +50,7 @@ class CouplingTransform(transform.Transform):
 
         if self.blob:
             self.transform_net = transform_net_create_fn(
-                self.num_identity_features*self.nbins_in,
+                self.num_identity_features * self.nbins_in,
                 self.num_transform_features * self._transform_dim_multiplier()
             )
         else:
@@ -63,11 +68,11 @@ class CouplingTransform(transform.Transform):
         return len(self.transform_features)
 
     def one_blob(self,xd):
-        binning = (0.5/nbins_in) + torch.arange(0., 1.,1./nbins_in).repeat(xd.numel())
-        binning = binning.reshape(-1,num_identity_features,nbins_in)
+        binning = (0.5/self.nbins_in) + torch.arange(0., 1.,1./self.nbins_in).repeat(xd.numel())
+        binning = binning.reshape(-1,self.num_identity_features,self.nbins_in)
         x = xd.unsqueeze(-1)
-        res = torch.exp(((-nbins_in*nbins_in)/2.) * (binning-x)**2)
-        return res.reshape(-1,num_identity_features*nbins_in)
+        res = torch.exp(((-self.nbins_in*self.nbins_in)/2.) * (binning-x)**2)
+        return res.reshape(-1,self.num_identity_features*self.nbins_in)
 
     def forward(self, inputs, context=None):
         if inputs.dim() not in [2, 4]:
@@ -143,7 +148,6 @@ class AffineCouplingTransform(CouplingTransform):
         unconstrained_scale = transform_params[:, self.num_transform_features:, ...]
         shift = transform_params[:, :self.num_transform_features, ...]
         scale = torch.exp(nn.Tanh()(unconstrained_scale))
-        #scale = nn.Tanh()(unconstrained_scale)
         return scale, shift
 
     def _coupling_transform_forward(self, inputs, transform_params):
@@ -207,11 +211,11 @@ class PiecewiseLinearCouplingTransform(PiecewiseCouplingTransform):
     def __init__(self,
                  mask,
                  transform_net_create_fn,
-                 num_bins=10,
-                 img_shape=None):
+                 blob = None,
+                 num_bins=10):
         self.num_bins = num_bins
 
-        super().__init__(mask, transform_net_create_fn)
+        super().__init__(mask, transform_net_create_fn,blob)
 
     def _transform_dim_multiplier(self):
         return self.num_bins
@@ -233,6 +237,7 @@ class PiecewiseQuadraticCouplingTransform(PiecewiseCouplingTransform):
     def __init__(self,
                  mask,
                  transform_net_create_fn,
+                 blob = None,
                  num_bins=10,
                  min_bin_width=splines.DEFAULT_MIN_BIN_WIDTH,
                  min_bin_height=splines.DEFAULT_MIN_BIN_HEIGHT):
@@ -240,7 +245,7 @@ class PiecewiseQuadraticCouplingTransform(PiecewiseCouplingTransform):
         self.min_bin_width = min_bin_width
         self.min_bin_height = min_bin_height
 
-        super().__init__(mask, transform_net_create_fn)
+        super().__init__(mask, transform_net_create_fn, blob)
 
     def _transform_dim_multiplier(self):
         return self.num_bins * 2 + 1
@@ -269,6 +274,7 @@ class PiecewiseCubicCouplingTransform(PiecewiseCouplingTransform):
     def __init__(self,
                  mask,
                  transform_net_create_fn,
+                 blob = None,
                  num_bins=10,
                  min_bin_width=splines.DEFAULT_MIN_BIN_WIDTH,
                  min_bin_height=splines.DEFAULT_MIN_BIN_HEIGHT):
@@ -277,7 +283,7 @@ class PiecewiseCubicCouplingTransform(PiecewiseCouplingTransform):
         self.min_bin_width = min_bin_width
         self.min_bin_height = min_bin_height
 
-        super().__init__(mask, transform_net_create_fn)
+        super().__init__(mask, transform_net_create_fn, blob)
 
     def _transform_dim_multiplier(self):
         return self.num_bins * 2 + 2

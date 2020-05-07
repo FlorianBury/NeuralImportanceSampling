@@ -3,6 +3,11 @@ import sys
 import torch
 from torch import nn
 
+"""
+Free inspiration from :
+    https://github.com/bayesiains/nsf, arXiv:1906.04032 (PyTorch)
+    https://gitlab.com/i-flow/i-flow/, arXiv:2001.05486 (Tensorflow)
+"""
 
 class Transform(nn.Module):
     """Base class for all transform objects."""

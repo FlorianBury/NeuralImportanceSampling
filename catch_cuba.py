@@ -6,13 +6,8 @@ import numpy as np
 import subprocess
 import torch
 
-from call_cuba import parserCuba
 from visualize import visualize
 import functions
-
-dict_values = {}
-dict_points = {}
-points = []
 
 class CatchCuba:
     def __init__(self,func,ndim,nstart,nincrease,maxeval,epsrel):
@@ -24,11 +19,9 @@ class CatchCuba:
         self.epsrel      = epsrel
         self.dict_points = {}
         self.dict_values = {}
-        self.visObject   = visualize('Plots/Cuba_'+func)
         self.bins2D      = None
 
         self._run()
-        self._plotProgress()
 
     def _run(self):
         print ("Starting integration with Cuba")
@@ -69,7 +62,15 @@ class CatchCuba:
             self.dict_points[n] = np.array(points[pointer:n])
             pointer = n
 
-    def _plotProgress(self):
+    def getPointSets(self):
+        return self.dict_points
+
+    def getIntegralValues(self):
+        return self.dict_values
+
+    def plotProgress(self):
+        self.visObject   = visualize('Plots/Cuba_'+self.func)
+
         # Add target #
         grid_x1 , grid_x2 = torch.meshgrid(torch.linspace(0,1,100),torch.linspace(0,1,100))
         grid = torch.cat([grid_x1.reshape(-1,1),grid_x2.reshape(-1,1)],axis=1)
@@ -99,7 +100,7 @@ class CatchCuba:
             y_centers = (y_edges[:-1] + y_edges[1:]) / 2
             x_centers, y_centers = np.meshgrid(x_centers,y_centers)
 
-            self.visObject.AddContour(x_centers,y_centers,self.bins2D,"Cumulative points")
+            self.visObject.AddContour(x_centers,y_centers,self.bins2D,"Cuba cumulative points")
 
             # Integral #
             self.visObject.AddCurves(x     = n,                                                                                                                                                     
@@ -116,13 +117,15 @@ class CatchCuba:
             self.visObject.MakePlot(n)
 
 if __name__ == '__main__':
+    from call_cuba import parserCuba
     args = parserCuba()
-    CatchCuba(func      = args.function,
-              ndim      = args.ndim,
-              nstart    = args.nstart,
-              nincrease = args.nincrease,
-              maxeval   = args.maxeval,
-              epsrel    = args.epsrel)
+    instance = CatchCuba(func      = args.function,
+                         ndim      = args.ndim,
+                         nstart    = args.nstart,
+                         nincrease = args.nincrease,
+                         maxeval   = args.maxeval,
+                         epsrel    = args.epsrel)
+    instance.plotProgress()
 
 
 

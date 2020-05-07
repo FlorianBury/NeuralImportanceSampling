@@ -29,7 +29,7 @@ def parserCuba():
 
 args = parserCuba()
 
-func = getattr(functions,args.function)
+func = getattr(functions,args.function)(args.ndim)
 
 def functionForIntegration(ndim, xx, ncomp, ff, userdata):
     x = [xx[i] for i in range(ndim.contents.value)]

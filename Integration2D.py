@@ -8,300 +8,271 @@ import argparse
 
 
 from visualize import visualize
-from RealNVP import RealNVP
-from functions import *
+import functions
+from network import *
+from integrator import *
+from transform import *
+from couplings import *
+
+from catch_cuba import CatchCuba
 
 torch.set_default_dtype(torch.float32)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class Integration2D:
-    def __init__(self,epochs,batch_size,lr,hidden_dim,n_coupling_layers,n_hidden_layers,save_plt_interval,batchnorm,plot_dir_name):
+    def __init__(self,epochs,batch_size,lr,hidden_dim,n_coupling_layers,n_hidden_layers,funcname,blob,loss_func,piecewise_bins,save_plt_interval,plot_dir_name):
         self.epochs             = epochs
         self.batch_size         = batch_size
         self.lr                 = lr
         self.hidden_dim         = hidden_dim
         self.n_coupling_layers  = n_coupling_layers
         self.n_hidden_layers    = n_hidden_layers
+        self.blob               = blob
+        self.piecewise_bins     = piecewise_bins  
+        self.loss_func          = loss_func
         self.save_plt_interval  = save_plt_interval
-        self.batchnorm          = batchnorm
         self.plot_dir_name      = plot_dir_name
-        self.method1_I          = []
-        self.method1_sig2       = []
-        self.method2_I          = []
-        self.method2_sig2       = []
-        self.method3_I          = []
-        self.method3_sig2       = []
-        self.bins2D           = None
+        self.function           = getattr(functions,funcname)(n=2)
 
         self._run()
 
-    def _defineModel(self):
-        mask = torch.tensor([0,1])
-        self.model = RealNVP(input_dim          = 2,
-                             hidden_dim         = self.hidden_dim,
-                             mask               = mask,
-                             n_couplinglayers   = self.n_coupling_layers,
-                             n_hiddenlayers     = self.n_hidden_layers,
-                             batchnorm          = self.batchnorm)
+    def create_base_transform(self,i,coupling_name):
+        mask = [i%2,(i+1)%2]
+        transform_net_create_fn = lambda in_features, out_features: MLP(in_shape            = [in_features],
+                                                                        out_shape           = [out_features],
+                                                                        hidden_sizes        = [self.hidden_dim]*self.n_hidden_layers,
+                                                                        hidden_activation   = nn.ReLU(),
+                                                                        output_activation   = None)
+        if coupling_name == 'additive':
+            return AdditiveCouplingTransform(mask,transform_net_create_fn,self.blob)
+        elif coupling_name == 'affine':
+            return AffineCouplingTransform(mask,transform_net_create_fn,self.blob)
+        elif coupling_name == 'piecewiseLinear':
+            return PiecewiseLinearCouplingTransform(mask,transform_net_create_fn,self.blob,self.piecewise_bins)
+        elif coupling_name == 'piecewiseQuadratic':
+            return PiecewiseQuadraticCouplingTransform(mask,transform_net_create_fn,self.blob,self.piecewise_bins)
+        elif coupling_name == 'piecewiseCubic':
+            return PiecewiseCubicCouplingTransform(mask,transform_net_create_fn,self.blob,self.piecewise_bins)
+        else:
+            raise RuntimeError("Could not find coupling with name %s"%coupling_name)
 
+    def create_flow(self,coupling_name):
+        return CompositeTransform([self.create_base_transform(i,coupling_name) for i in range(self.n_coupling_layers)])
+
+    def _initialize(self):
         # Training #
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
-        self.prior_z = torch.distributions.uniform.Uniform(torch.tensor([0.0,0.0]), torch.tensor([1.0,1.0]))
-        self.lossfunction = nn.MSELoss()
-
-        # Function to integrate #
-        self.alpha = 0.2
-        self.function  = Camel 
-        #self.analytic_integral = 2*(0.5*(math.erf(1/(3*self.alpha))+math.erf(2/(3*self.alpha))))**2
-        #self.function  = Gaussian
-        #analytic_integral = math.erf(1/(2*self.alpha))**2
-        #self.function = compute_U2
+        self.dist = torch.distributions.uniform.Uniform(torch.tensor([0.0,0.0]), torch.tensor([1.0,1.0]))
+        lr_min = 1e-8
 
         # Visualization plot #
         self.visObject = visualize('Plots/'+self.plot_dir_name)
-        #self.visObject.AddAnalyticIntegral(self.analytic_integral)
 
         self.grid_x1 , self.grid_x2 = torch.meshgrid(torch.linspace(0,1,100),torch.linspace(0,1,100))
-        self.grid = torch.cat([self.grid_x1.reshape(-1,1),self.grid_x2.reshape(-1,1)],axis=1)
-        func_out = self.function(self.grid,self.alpha,2).reshape(100,100)
-        self.visObject.AddContour(self.grid_x1,self.grid_x2,func_out,"Target function : "+self.function.__name__)
+        grid = torch.cat([self.grid_x1.reshape(-1,1),self.grid_x2.reshape(-1,1)],axis=1)
+        self.func_out = self.function(grid).reshape(100,100)
 
+        #----- Additive Model -----#
+        additiveFlow = self.create_flow('additive')
+        additiveOptimizer = torch.optim.Adam(additiveFlow.parameters(), lr=self.lr)
+        additiveScheduler = torch.optim.lr_scheduler.CosineAnnealingLR(additiveOptimizer, self.epochs, lr_min)
+        self.additiveIntegrator = Integrator(func        = self.function,
+                                             flow        = additiveFlow,
+                                             dist        = self.dist,
+                                             optimizer   = additiveOptimizer,
+                                             scheduler   = additiveScheduler,
+                                             loss_func   = self.loss_func)
+        #----- Affine Model -----#
+        affineFlow = self.create_flow('affine')
+        affineOptimizer = torch.optim.Adam(affineFlow.parameters(), lr=self.lr)
+        affineScheduler = torch.optim.lr_scheduler.CosineAnnealingLR(affineOptimizer, self.epochs, lr_min)
+        self.affineIntegrator = Integrator(func        = self.function,
+                                           flow        = affineFlow,
+                                           dist        = self.dist,
+                                           optimizer   = affineOptimizer,
+                                           scheduler   = affineScheduler,
+                                           loss_func   = self.loss_func)
+        #----- Piecewise Linear Model -----#
+        piecewiseLinearFlow = self.create_flow('piecewiseLinear')
+        piecewiseLinearOptimizer = torch.optim.Adam(piecewiseLinearFlow.parameters(), lr=self.lr)
+        piecewiseLinearScheduler = torch.optim.lr_scheduler.CosineAnnealingLR(piecewiseLinearOptimizer, self.epochs, lr_min)
+        self.piecewiseLinearIntegrator = Integrator(func        = self.function,
+                                                    flow        = piecewiseLinearFlow,
+                                                    dist        = self.dist,
+                                                    optimizer   = piecewiseLinearOptimizer,
+                                                    scheduler   = piecewiseLinearScheduler,
+                                                    loss_func   = self.loss_func)
+        #----- Piecewise Quadratic Model -----#
+        piecewiseQuadraticFlow = self.create_flow('piecewiseQuadratic')
+        piecewiseQuadraticOptimizer = torch.optim.Adam(piecewiseQuadraticFlow.parameters(), lr=self.lr)
+        piecewiseQuadraticScheduler = torch.optim.lr_scheduler.CosineAnnealingLR(piecewiseQuadraticOptimizer, self.epochs, lr_min)
+        self.piecewiseQuadraticIntegrator = Integrator(func        = self.function,
+                                                       flow        = piecewiseQuadraticFlow,
+                                                       dist        = self.dist,
+                                                       optimizer   = piecewiseQuadraticOptimizer,
+                                                       scheduler   = piecewiseQuadraticScheduler,
+                                                       loss_func   = self.loss_func)
+        #----- Piecewise Cubic Model -----#
+        piecewiseCubicFlow = self.create_flow('piecewiseCubic')
+        piecewiseCubicOptimizer = torch.optim.Adam(piecewiseCubicFlow.parameters(), lr=self.lr)
+        piecewiseCubicScheduler = torch.optim.lr_scheduler.CosineAnnealingLR(piecewiseCubicOptimizer, self.epochs, lr_min)
+        self.piecewiseCubicIntegrator = Integrator(func        = self.function,
+                                                   flow        = piecewiseCubicFlow,
+                                                   dist        = self.dist,
+                                                   optimizer   = piecewiseCubicOptimizer,
+                                                   scheduler   = piecewiseCubicScheduler,
+                                                   loss_func   = self.loss_func)
 
-    #print (model)
-    #for param in model.parameters():
-    #  print(param.data)
+        self.integrator_dict = {'Uniform'               : None,
+                                'Cuba'                 : None,
+                                'Additive'             : self.additiveIntegrator,
+                                'Affine'               : self.affineIntegrator,
+                                'Piecewise Linear'     : self.piecewiseLinearIntegrator,
+                                'Piecewise Quadratic'  : self.piecewiseQuadraticIntegrator,
+                                'Piecewise Cubic'      : self.piecewiseCubicIntegrator}
+
+        self.means = {k:[] for k in self.integrator_dict.keys()}
+        self.errors = {k:[] for k in self.integrator_dict.keys()}
+        self.bins2D = {k:None for k in self.integrator_dict.keys()}
+        self.mean_wgt = {k:0 for k in self.integrator_dict.keys()}
+        self.err_wgt = {k:0 for k in self.integrator_dict.keys()}
+
+        # Cuba #
+        cuba = CatchCuba(func       = self.function.name,
+                         ndim       = 2,
+                         nstart     = self.batch_size,
+                         nincrease  = 0,
+                         maxeval    = self.epochs*self.batch_size,
+                         epsrel     = 0)
+
+        self.cuba_points = cuba.getPointSets()
+        self.cuba_integral = cuba.getIntegralValues()
+
+        # Analytic #
+        self.mean_wgt['analytic'] = self.function.integral
+        self.err_wgt['analytic'] = self.function.integral_error
 
     def _run(self):
         print ("="*80)
-        print ("New model with name %s"%self.plot_dir_name)
-        
+        print ("New output dir with name %s"%self.plot_dir_name)
+
         # Make model #
-        self._defineModel()
+        self._initialize()
 
         # Loop over epochs #
-        for epoch in range(1, self.epochs + 1):
-            self._sample(epoch)
-            self._train(epoch)
+        print( self.epochs)
+        for epoch in range(1,self.epochs+1):
+            print ("Epoch %d/%d [%0.2f%%]"%(epoch,self.epochs,epoch/self.epochs*100))
+            # loop over models#
+            for model, integrator in self.integrator_dict.items():  
+                if model == "Cuba":
+                    cuba_res = self.cuba_integral[epoch*self.batch_size] # [mean,error,chi2,dof]
+                    cuba_pts = self.cuba_points[epoch*self.batch_size]
+                    mean_wgt = cuba_res[0]
+                    err_wgt = cuba_res[1]
+                    x = np.array(cuba_pts)
+                    loss = 0.
+                    lr = 0.
+                else:
+                    if model == "Uniform": # Use uniform sampling
+                        x = self.dist.sample((self.batch_size,))
+                        y = self.function(x)
+                        x = x.data.numpy()
+                        mean = torch.mean(y).item()
+                        error = torch.sqrt(torch.var(y)/(self.batch_size-1.)).item()
+                        loss = 0.
+                        lr = 0.
+                    else: # use NIS
+                        # Integrate on one epoch and produce resuts #
+                        result_dict = integrator.train_one_step(self.batch_size,lr=True,integral=True,points=True)
+                        loss = result_dict['loss']
+                        lr = result_dict['lr']
+                        mean = result_dict['mean']
+                        error = result_dict['uncertainty']
+                        z = result_dict['z'].data.numpy()
+                        x = result_dict['x'].data.numpy()
 
-    def _train(self,epoch):
-        self.model.train()
-        # Generate data #
-        z = self.prior_z.sample((self.batch_size,))
-        # Reinitialize optimizer #
-        self.optimizer.zero_grad()
-        # Process through network # 
-        x, det = self.model(z)
-        # Process through function #
-        y = self.function(x,self.alpha,2)
-        # Gradient descent #
-        #loss = self.lossfunction(y,det)
-        loss = -torch.log(y/det).mean()
-        #loss = torch.mean(-torch.log(det) - torch.log(y))
-        loss.backward()
-        cur_loss = loss.item()
-        self.optimizer.step()
-        print ("Train epoch %d/%d : Loss : %0.10f"%(epoch,self.epochs,cur_loss/z.shape[0]))
+                    # Record values #
+                    self.means[model].append(mean)
+                    self.errors[model].append(error)
 
-    def _sample(self,epoch):
-        self.model.eval()
-        with torch.no_grad():
-            # Process #
-            N = 1000
-            z = self.prior_z.sample((N,))
-            x, det = self.model(z) 
-            #print ('mean',x.mean(axis=0))
-            #print ('std ',x.std(axis=0))
-            #print ('min ',x.min(axis=0)[0])
-            #print ('max ',x.max(axis=0)[0])
-            #print ('det',det)
+                    # Combine all mean and errors 
+                    mean_wgt = np.sum(self.means[model]/np.power(self.errors[model],2),axis=-1)
+                    err_wgt = np.sum(1./(np.power(self.errors[model],2)), axis=-1)
+                    mean_wgt /= err_wgt
+                    err_wgt = 1/np.sqrt(err_wgt)
+            
+                # Record and print #
+                self.mean_wgt[model] = mean_wgt
+                self.err_wgt[model] = err_wgt
 
+                print("\t"+(model+' ').ljust(25,'.')+("Loss = %0.8f"%loss).rjust(20,' ')+("\t(LR = %0.8f)"%lr).ljust(20,' ')+("Integral = %0.8f +/- %0.8f"%(self.mean_wgt[model],self.err_wgt[model])))
 
-            # Evaluate integral #
-            y = self.function(x,self.alpha,2) # = f(xn), det = p(xn)
-            f = y
-            p = 1#det
+                # Visualization #
+                self.visObject.AddCurves(x = epoch,x_err = 0, title = model+" model", 
+                                         dict_val = {'$I_{numeric}$': [mean_wgt,err_wgt],'$I_{analytic}$':[self.function.integral,self.function.integral_error]})
+                if self.bins2D[model] is None:
+                    self.bins2D[model], x_edges, y_edges  = np.histogram2d(x[:,0],x[:,1],bins=20,range=[[0,1],[0,1]])
+                else:
+                    newbins, x_edges, y_edges = np.histogram2d(x[:,0],x[:,1],bins=20,range=[[0,1],[0,1]])
+                    self.bins2D[model] += newbins.T
+                x_centers = (x_edges[:-1] + x_edges[1:]) / 2
+                y_centers = (y_edges[:-1] + y_edges[1:]) / 2
+                x_centers, y_centers = np.meshgrid(x_centers,y_centers)
 
-            # First method : Lepage, A NEW ALGORITHM FOR ADAPTIVE MULTIDIMENSIONAL INTEGRATION (1976)
-            S1 = ((f/p).sum()/N).item()
-            S2 = ((f/p).pow(2).sum()/N).item()
+                if epoch % self.save_plt_interval == 0:
+                    self.visObject.AddPointSet(x,title="Observed $x$ %s"%model,color='b')
+                    self.visObject.AddContour(x_centers,y_centers,self.bins2D[model],"Cumulative %s"%model)
 
-            self.method1_I.append(S1)
-            self.method1_sig2.append((S2-S1**2)/(N-1))
-
-            # v1 #
-            method1_Ibar_v1 = 0
-            method1_sig2bar_v1 = 0
-            method1_chi2perDof_v1 = 0
-            for i in range(len(self.method1_I)):
-                method1_sig2bar_v1 += 1/self.method1_sig2[i]
-            method1_sig2bar_v1 = 1/method1_sig2bar_v1
-            for i in range(len(self.method1_I)):
-                method1_Ibar_v1 += method1_sig2bar_v1+self.method1_I[i]/self.method1_sig2[i]
-            for i in range(len(self.method1_I)):
-                method1_chi2perDof_v1 += (self.method1_I[i]-method1_Ibar_v1)**2/self.method1_sig2[i]
-            if len(self.method1_I) > 1 :
-                method1_chi2perDof_v1 /= (len(self.method1_I)-1)
-
-            self.visObject.AddCurves(x     = epoch,
-                                     x_err = 0,
-                                     title = "Method 1 : Lepage v1",
-                                     dict_val = {r'$I$': [self.method1_I[-1],self.method1_sig2[-1]],
-                                                 r'$\bar{I}$': [method1_Ibar_v1,method1_sig2bar_v1]})
-                                                 #r'$\chi^2 per dof$':[method1_chi2perDof_v1,0]})
-                
-            # v2 #
-            method1_Ibar_v2 = 0
-            method1_sig2bar_v2 = 0
-            method1_chi2perDof_v2 = 0
-            sum_I2_over_sig2 = 0
-            for i in range(len(self.method1_I)):
-                method1_Ibar_v2 += self.method1_I[i]*(self.method1_I[i]**2/self.method1_sig2[i])
-                sum_I2_over_sig2 += self.method1_I[i]**2/self.method1_sig2[i]
-            method1_Ibar_v2 /= sum_I2_over_sig2
-            method1_sig2bar_v2 = method1_Ibar_v2**2/sum_I2_over_sig2
-            for i in range(len(self.method1_I)):
-                method1_chi2perDof_v2 += ((self.method1_I[i]-method1_Ibar_v2)**2/method1_Ibar_v2**2) * (self.method1_I[i]**2/self.method1_sig2[i])
-            if len(self.method1_I) > 1 :
-                method1_chi2perDof_v2 /= (len(self.method1_I)-1)
-
-            self.visObject.AddCurves(x     = epoch,
-                                     x_err = 0,
-                                     title = "Method 1 : Lepage v2",
-                                     dict_val = {r'$I$': [self.method1_I[-1],self.method1_sig2[-1]],
-                                                 r'$\bar{I}$': [method1_Ibar_v2,method1_sig2bar_v2]})
-                                                 #r'$\chi^2/dof$':[method1_chi2perDof_v2,0]})
-
-            print ("Method 1 : I = %0.5f +/- %0.5f"%(self.method1_I[-1],self.method1_sig2[-1]))
-            print ("\tV1 : Ibar = %0.5f +/- %0.5f (chi2/dof = %0.5f)"%(method1_Ibar_v1,method1_sig2bar_v1,method1_chi2perDof_v1))
-            print ("\tV2 : Ibar = %0.5f +/- %0.5f (chi2/dof = %0.5f)"%(method1_Ibar_v2,method1_sig2bar_v2,method1_chi2perDof_v2))
-
-            # Second method : Lepage, VEGAS - An Adaptive Multi-dimensional Integration Program (1980)
-
-
-            # Third method : Weinzierl, Introduction to Monte Carlo methods (2020)
-
-            ##fop = y/det     # = f(xn)/p(xn)
-            #fop = y     # = f(xn)/p(xn)
-            #Ej  = fop.sum()/N
-            #Sj2 = fop.pow(2).sum()/N-Ej**2
-
-            #self.Ej.append(Ej.item())
-            #self.Sj2.append(Sj2.item())
-            #self.Nj.append(N)
-
-            #w = 0
-            #E = 0
-            #for i in range(len(self.Ej)):
-            #    E += self.Nj[i]*self.Ej[i]/self.Sj2[i]
-            #    w += self.Nj[i]/self.Sj2[i]
-            #E /= w
-
-            #chi2dof = 0
-            #if len(self.Ej)>1:
-            #    for i in range(len(self.Ej)):
-            #        chi2dof += (self.Ej[i]-E)**2/self.Sj2[i]
-            #    chi2dof /= (len(self.Ej)-1)
-
-            #S1 = (y).sum()/N
-            #S2 = (y.pow(2)).sum()/N
-            #sig2 = (S2-S1**2)/N
-            #self.I.append(S1)
-            #self.sigma2.append(sig2)
-
-            #Ibar = 0
-            #Ibar_v2 = 0
-            #asum = 0
-            #asum_v2 = 0
-            #den = 0
-            #for i in range(len(self.I)):
-            #    asum += 1/self.sigma2[i]
-            #    b = self.I[i]**2/self.sigma2[i]
-            #    Ibar_v2 +=  self.I[i]*b
-            #    den += b
-            #Ibar_v2 /= den
-            #sigbar2_v2 = Ibar_v2/den
-            #sigbar2 = 1/asum
-            #for i in range(len(self.I)):
-            #    Ibar += sigbar2*self.I[i]+self.sigma2[i]
-
-            #chi2 = 0
-            #chi2_v2 = 0
-            #for i in range(len(self.I)):
-            #    chi2 += (self.I[i]-Ibar)**2/self.sigma2[i]
-            #    chi2_v2 += (self.I[i]-Ibar)**2 * self.I[i]**2 / (Ibar_v2**2 * self.sigma2[i])
-
-            #if len(self.I)>1:
-            #    chi2perdof = chi2/(len(self.I)-1)
-            #    chi2perdof_v2 = chi2/(len(self.I)-1)
-
-            #print ("V1 : %0.5f +/- %0.5f (chi2 = %0.5f)"%(Ibar,sigbar2,chi2))
-            #print ("V2 : %0.5f +/- %0.5f (chi2 = %0.5f)"%(Ibar_v2,sigbar2_v2,chi2_v2))
-            #print ("cur:  %0.5f +/- %0.5f"%(self.I[-1],self.sigma2[-1])) 
-            #print ("\tIntegral = %0.5f +/- %0.5f (chi2/dof = %0.5f)"%(E,0,chi2dof))
-            #print (self.analytic_integral)
-            #integral = y.mean().item()
-            #variance = torch.sqrt((1/(x.shape[0]))*(y-integral).pow(2).sum()).item()
-            #print ("\tIntegral = %0.5f +/- %0.5f"%(integral,variance))
-
-
-            # Draw determinant function #
-
-            #_ , funcdet = self.model(self.grid.float())
-            #_, funcinvdet = self.model.backward(self.grid.float())
-
-            #self.visObject.AddContour(self.grid_x1,self.grid_x2,funcdet.reshape(100,100),"Jacobian det over latent $z$")
-            #self.visObject.AddContour(self.grid_x1,self.grid_x2,funcinvdet.reshape(100,100),"Inverse Jacobian det over observed $x$")
-
-#            if (integral>0.9):
-#                X = torch.from_numpy(np.c_[x,y])
-#                _, invdet = self.model.backward(X.float())
-#                print (invdet)
-#
-#                np.save("X.npy",X.data.numpy())
-#                np.save("invdet.npy",invdet.data.numpy())
-#                sys.exit()
-
-            if self.bins2D is None:
-                self.bins2D, x_edges, y_edges  = np.histogram2d(x.data.numpy()[:,0],x.data.numpy()[:,1],bins=20,range=[[0,1],[0,1]])
-                self.bins2D = self.bins2D.T
-            else:
-                newbins, x_edges, y_edges = np.histogram2d(x.data.numpy()[:,0],x.data.numpy()[:,1],bins=20,range=[[0,1],[0,1]])
-                self.bins2D += newbins.T
-
-            x_centers = (x_edges[:-1] + x_edges[1:]) / 2
-            y_centers = (y_edges[:-1] + y_edges[1:]) / 2
-            x_centers, y_centers = np.meshgrid(x_centers,y_centers)
-                
-            # Plot points #
-            if epoch%self.save_plt_interval == 0:
-                self.visObject.AddPointSet(z,title="Latent space $z$",color='g')
-                self.visObject.AddPointSet(x,title="Observed space $x$",color='b')
-                #self.visObject.AddPointSet(z_inv,title="Reversed",color='r')
-                self.visObject.AddContour(x_centers,y_centers,self.bins2D,"Cumulative points")
-            # Create png file #
+            # Curve for all models #
+            dict_val = {}
+            for model in self.mean_wgt.keys():
+                dict_val['$\sigma_{I}^{%s}$'%model] = [self.err_wgt[model],0]
+            self.visObject.AddCurves(x = epoch,x_err = 0, title = "Value error", dict_val = dict_val)
+            # Plot function output #
+            if epoch % self.save_plt_interval == 0:
+                self.visObject.AddPointSet(z,title="Latent space $z$",color='b')
+                self.visObject.AddContour(self.grid_x1,self.grid_x2,self.func_out,"Target function : "+self.function.name)
                 self.visObject.MakePlot(epoch)
+
+        # Final printout #
+        print ("Models results")
+        for model in self.mean_wgt.keys():
+            print ('..... '+('Model %s'%model).ljust(40,' ')+'Integral : %0.8f +/- %0.8f'%(self.mean_wgt[model],self.err_wgt[model]))
+
 
 
 parser = argparse.ArgumentParser(description="Integration of 2D function")
-parser.add_argument('-e','--epochs', action='store', required=True, type=int,
-                    help="Number of epochs")
-parser.add_argument('-b','--batch_size', action='store', required=True, type=int,
-                    help="Batch size")
-parser.add_argument('-lr','--lr', action='store', required=True, type=float,
-                    help="Learning rate")
-parser.add_argument('-N','--hidden_dim', action='store', required=True, type=int,
-                    help="Number of neurons per layer in the coupling layers")
-parser.add_argument('-nc','--n_coupling_layers', action='store', required=True, type=int,
-                    help="Number of coupling layers")
-parser.add_argument('-nh','--n_hidden_layers', action='store', required=True, type=int,
-                    help="Number of hidden layers in coupling layers")
-parser.add_argument('--save_plt_interval', action='store', required=False, type=int, default=5,
+general = parser.add_argument_group('Global arguments')
+
+general.add_argument('--save_plt_interval', action='store', required=False, type=int, default=5,
                     help="Frequency for plot saving (default : 5)")
-parser.add_argument('--batchnorm', action='store_true', required=False, default=False,
-                    help="Wether to apply batchnorm")
-parser.add_argument('--dirname', action='store', required=True, type=str,
+general.add_argument('--dirname', action='store', required=True, type=str,
                     help="Directory name for the plots")
+
+NIS = parser.add_argument_group('Arguments for the integration for the Neural Importance Sampling')
+NIS.add_argument('-f','--function', action='store', required=True,
+                    help="Name of the function in functions.py to use for integration")
+NIS.add_argument('-e','--epochs', action='store', required=True, type=int,
+                    help="Number of epochs")
+NIS.add_argument('-b','--batch_size', action='store', required=True, type=int,
+                    help="Batch size")
+NIS.add_argument('-lr','--lr', action='store', required=True, type=float,
+                    help="Learning rate")
+NIS.add_argument('-N','--hidden_dim', action='store', required=True, type=int,
+                    help="Number of neurons per layer in the coupling layers")
+NIS.add_argument('-nc','--n_coupling_layers', action='store', required=True, type=int,
+                    help="Number of coupling layers")
+NIS.add_argument('-nh','--n_hidden_layers', action='store', required=True, type=int,
+                    help="Number of hidden layers in coupling layers")
+NIS.add_argument('--blob', action='store', required=False, type=int,
+                    help="Number of bins for blob-encoding (default = None)")
+NIS.add_argument('--piecewise', action='store', required=False, type=int, default=10,
+                    help="Number of bins for piecewise polynomial coupling (default = 10)")
+NIS.add_argument('--loss', action='store', required=False, type=str, default="MSE",
+                    help="Name of the loss function in divergences (default = MSE)")
+
+cuba = parser.add_argument_group('Arguments for the integration using cuba')
 
 args = parser.parse_args()
 
@@ -311,7 +282,10 @@ instance = Integration2D(epochs             = args.epochs,
                          hidden_dim         = args.hidden_dim,
                          n_coupling_layers  = args.n_coupling_layers,
                          n_hidden_layers    = args.n_hidden_layers,
+                         blob               = args.blob,
+                         piecewise_bins     = args.piecewise,
+                         loss_func          = args.loss,
                          save_plt_interval  = args.save_plt_interval,
-                         batchnorm          = args.batchnorm,
-                         plot_dir_name      = args.dirname)
+                         plot_dir_name      = args.dirname,
+                         funcname           = args.function)
 

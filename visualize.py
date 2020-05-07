@@ -12,6 +12,7 @@ class visualize:
         self.idx = 0
         self.data_dict = {}
         self.cont_dict = {}
+        self.hist_dict = {}
         self.curv_dict = {}
         self.path = os.path.abspath(path)
         if os.path.exists(self.path):
@@ -54,33 +55,49 @@ class visualize:
         #import pprint
         #pprint.pprint(self.curv_dict)
 
-    def ResetData(self):
-        self.data_dict = dict()
+    def AddHistogram(self,vec,bins,title):
+        vec = vec.data.numpy()
+        vals, edges = np.histogram(vec,bins=bins)
+        centers = (edges[:-1] + edges[1:]) / 2
+        widths = np.diff(edges)
+        self.hist_dict[title] = (centers,vals,widths)
 
     def MakePlot(self,epoch):
         N_data = len(self.data_dict.keys())
         N_cont = len(self.cont_dict.keys())
+        N_hist = len(self.hist_dict.keys())
         N_curv = len(self.curv_dict.keys())
-        Nh = max(N_data,N_cont,N_curv)
-        Nv = int(N_data!=0)+int(N_cont!=0)+int(N_curv!=0)
+        Nh = max(N_data,N_cont,N_curv,N_hist)
+        Nv = int(N_data!=0)+int(N_cont!=0)+int(N_hist!=0)+int(N_curv!=0)
         fig, axs = plt.subplots(Nv,Nh,figsize=(Nh*6,Nv*6))
         plt.subplots_adjust(left=0.05, bottom=0.05, right=0.95, top=0.9, wspace=0.2, hspace=0.2)
         fig.suptitle("Epoch %d"%epoch,fontsize=22)
 
+        if Nv == 1: # Turn the ax vector into array
+            axs = axs.reshape(1,-1)
         idx_data = 0
         idx_cont = 0
+        idx_hist = 0
         idx_curv = 0
         idx_vert = 0 
         ##### Data plots #####
         # Print point distribution #
         if len(self.data_dict.keys()) != 0:
             for att,data in self.data_dict.items():
-                axs[idx_vert,idx_data].set_title(att[0],fontsize=20)
+                title = att[0]
+                color = att[1]
+                if len(data) == 2:
+                    assert len(color) == 2
+                    d1 = data[0]
+                    d2 = data[1]
+                    axs[idx_vert,idx_data].scatter(x=d1[:,0],y=d1[:,1],c=color[0],marker='o',s=1)
+                    axs[idx_vert,idx_data].scatter(x=d2[:,0],y=d2[:,1],c=color[1],marker='o',s=1)
+                    axs[idx_vert,idx_data].quiver(d1[:,0],d1[:,1],(d2-d1)[:,0],(d2-d1)[:,1],scale=1,width=0.0005,angles='xy', scale_units='xy')
+                else:
+                    axs[idx_vert,idx_data].scatter(x=data[:,0],y=data[:,1],c=att[1],marker='o',s=1)
+                axs[idx_vert,idx_data].set_title(title,fontsize=20)
                 axs[idx_vert,idx_data].set_xlim(0,1)
                 axs[idx_vert,idx_data].set_ylim(0,1)
-                axs[idx_vert,idx_data].scatter(x=data[:,0],y=data[:,1],c=att[1],marker='o',s=1)
-                #axs[1,i].set_aspect("equal")
-                #axs[1,i].hist2d(x=data[:,0],y=data[:, 1],bins=20,norm=mcolors.PowerNorm(0.3),range=[[0, 1], [0, 1]])
                 idx_data += 1
             idx_vert += 1
 
@@ -89,9 +106,17 @@ class visualize:
             for title,data in self.cont_dict.items():
                 axs[idx_vert,idx_cont].set_title(title,fontsize=20)
                 cs = axs[idx_vert,idx_cont].contourf(data[0],data[1],data[2],20)
-                fig.colorbar(cs, ax=axs[idx_vert,idx_cont])
+                #fig.colorbar(cs, ax=axs[idx_vert,idx_cont])
                 idx_cont += 1
             idx_vert += 1
+
+        ##### Hist plots ####
+        if len(self.hist_dict.keys()) != 0:
+            for title,(centers,vals,widths) in self.hist_dict.items():
+                axs[idx_vert,idx_hist].set_title(title,fontsize=20)
+                axs[idx_vert,idx_hist].bar(centers,vals,align='center',width=widths)
+            idx_vert += 1
+                
 
         ##### Curve plots #####
         if len(self.curv_dict.keys()) != 0:
@@ -125,8 +150,6 @@ class visualize:
         fig.savefig(path_fig)
         plt.close(fig)
         self.idx += 1
-        # Must resest data dict #
-        self.ResetData()
         
     
 #import numpy as np
