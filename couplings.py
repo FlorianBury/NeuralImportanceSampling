@@ -196,8 +196,7 @@ class PiecewiseCouplingTransform(CouplingTransform):
             transform_params = transform_params.reshape(b, d, -1)
 
         outputs, absdet = self._piecewise_cdf(inputs, transform_params, inverse)
-
-        return outputs, absdet.view(absdet.shape[0])
+        return outputs, absdet.prod(1)
 
     def _piecewise_cdf(self, inputs, transform_params, inverse=False):
         raise NotImplementedError()

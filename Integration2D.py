@@ -21,7 +21,7 @@ torch.set_default_dtype(torch.float32)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class Integration2D:
-    def __init__(self,epochs,batch_size,lr,hidden_dim,n_coupling_layers,n_hidden_layers,funcname,blob,loss_func,piecewise_bins,save_plt_interval,plot_dir_name):
+    def __init__(self,epochs,batch_size,lr,hidden_dim,n_coupling_layers,n_hidden_layers,funcname,blob,loss_func,piecewise_bins,save_plt_interval,plot_dir_name,cuba):
         self.epochs             = epochs
         self.batch_size         = batch_size
         self.lr                 = lr
@@ -34,6 +34,7 @@ class Integration2D:
         self.save_plt_interval  = save_plt_interval
         self.plot_dir_name      = plot_dir_name
         self.function           = getattr(functions,funcname)(n=2)
+        self.use_cuba           = cuba
 
         self._run()
 
@@ -63,7 +64,7 @@ class Integration2D:
     def _initialize(self):
         # Training #
         self.dist = torch.distributions.uniform.Uniform(torch.tensor([0.0,0.0]), torch.tensor([1.0,1.0]))
-        lr_min = 1e-8
+        lr_min = 1e-6
 
         # Visualization plot #
         self.visObject = visualize('Plots/'+self.plot_dir_name)
@@ -122,14 +123,26 @@ class Integration2D:
                                                    optimizer   = piecewiseCubicOptimizer,
                                                    scheduler   = piecewiseCubicScheduler,
                                                    loss_func   = self.loss_func)
+        #----- Cuba -----#
+        if self.use_cuba:
+            cuba = CatchCuba(func       = self.function.name,
+                             ndim       = 2,
+                             nstart     = self.batch_size,
+                             nincrease  = 0,
+                             maxeval    = self.epochs*self.batch_size,
+                             epsrel     = 0)
+            self.cuba_points = cuba.getPointSets()
+            self.cuba_integral = cuba.getIntegralValues()
 
+        #---- Dictioniary -----#
         self.integrator_dict = {'Uniform'               : None,
-                                'Cuba'                 : None,
                                 'Additive'             : self.additiveIntegrator,
                                 'Affine'               : self.affineIntegrator,
                                 'Piecewise Linear'     : self.piecewiseLinearIntegrator,
                                 'Piecewise Quadratic'  : self.piecewiseQuadraticIntegrator,
                                 'Piecewise Cubic'      : self.piecewiseCubicIntegrator}
+        if self.use_cuba:
+            self.integrator_dict['Cuba'] = None
 
         self.means = {k:[] for k in self.integrator_dict.keys()}
         self.errors = {k:[] for k in self.integrator_dict.keys()}
@@ -137,18 +150,7 @@ class Integration2D:
         self.mean_wgt = {k:0 for k in self.integrator_dict.keys()}
         self.err_wgt = {k:0 for k in self.integrator_dict.keys()}
 
-        # Cuba #
-        cuba = CatchCuba(func       = self.function.name,
-                         ndim       = 2,
-                         nstart     = self.batch_size,
-                         nincrease  = 0,
-                         maxeval    = self.epochs*self.batch_size,
-                         epsrel     = 0)
-
-        self.cuba_points = cuba.getPointSets()
-        self.cuba_integral = cuba.getIntegralValues()
-
-        # Analytic #
+        #----- Analytic -----#
         self.mean_wgt['analytic'] = self.function.integral
         self.err_wgt['analytic'] = self.function.integral_error
 
@@ -271,10 +273,14 @@ NIS.add_argument('--piecewise', action='store', required=False, type=int, defaul
                     help="Number of bins for piecewise polynomial coupling (default = 10)")
 NIS.add_argument('--loss', action='store', required=False, type=str, default="MSE",
                     help="Name of the loss function in divergences (default = MSE)")
+NIS.add_argument('--cuba', action='store_true', required=False, default=False,
+                    help="Wether to use integration with Cuba (default = False)")
 
-cuba = parser.add_argument_group('Arguments for the integration using cuba')
 
 args = parser.parse_args()
+
+if args.cuba:
+    print("[WARNING] Do not forget to add cuba library to library path (source cubaLink.sh)")
 
 instance = Integration2D(epochs             = args.epochs,
                          batch_size         = args.batch_size,
@@ -287,5 +293,6 @@ instance = Integration2D(epochs             = args.epochs,
                          loss_func          = args.loss,
                          save_plt_interval  = args.save_plt_interval,
                          plot_dir_name      = args.dirname,
-                         funcname           = args.function)
+                         funcname           = args.function,
+                         cuba               = args.cuba)
 
