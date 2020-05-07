@@ -8,7 +8,7 @@ Try :
 python3 Integration2D.py --help
 ```
 
-To see al available arguments
+To see all available arguments
 
 Some testing functions are in functions.py
 
